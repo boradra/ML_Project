@@ -24,13 +24,15 @@ LR         = 1e-4
 PATIENCE   = 6
 DEVICE     = torch.device("cuda")
 
-TRAIN_CSV  = r"c:\ML_Project\train_labels.csv"
-TEST_CSV   = r"c:\ML_Project\test_labels.csv"
-MODEL_PATH = r"c:\ML_Project\model_resnet.pt"
+TRAIN_CSV    = r"c:\ML_Project\train_labels.csv"
+TEST_CSV     = r"c:\ML_Project\test_labels.csv"
+TRAIN_SCORES = r"c:\ML_Project\train_scores.xlsx"
+TEST_SCORES  = r"c:\ML_Project\test_scores.xlsx"
+MODEL_PATH   = r"c:\ML_Project\model_resnet.pt"
 
 # ── Veri yükleyiciler ─────────────────────────────────────────
-train_ds = DrawingDataset(TRAIN_CSV, train=True)
-test_ds  = DrawingDataset(TEST_CSV,  train=False)
+train_ds = DrawingDataset(TRAIN_CSV, train=True,  scores_xlsx=TRAIN_SCORES)
+test_ds  = DrawingDataset(TEST_CSV,  train=False, scores_xlsx=TEST_SCORES)
 
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE,
                           shuffle=True,  num_workers=0, pin_memory=True)
