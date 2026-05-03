@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(python -c \"import kagglehub; path = kagglehub.dataset_download\\('vishmiperera/children-drawings'\\); import os; files = []; [files.extend\\([os.path.join\\(r,f\\) for f in fs]\\) for r,_,fs in os.walk\\(path\\)]; print\\('Toplam dosya:', len\\(files\\)\\); print\\('Path:', path\\); print\\('İlk 20 dosya:'\\); [print\\(f\\) for f in files[:20]]\")",
+      "Bash(pip install *)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
