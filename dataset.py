@@ -32,12 +32,16 @@ VAL_TRANSFORM = transforms.Compose([
 
 def make_transforms(img_size: int = 224):
     train = transforms.Compose([
-        transforms.Resize((img_size, img_size)),
+        transforms.Resize((int(img_size * 1.1), int(img_size * 1.1))),
+        transforms.RandomCrop(img_size),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.RandomVerticalFlip(p=0.2),
+        transforms.RandomRotation(20),
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+        transforms.RandomGrayscale(p=0.1),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.15)),
     ])
     val = transforms.Compose([
         transforms.Resize((img_size, img_size)),

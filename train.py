@@ -1,11 +1,12 @@
 """
-ResNet18 ile çocuk çizimlerinden psikolojik skor tahmini.
+ResNet50 ile çocuk çizimlerinden psikolojik skor tahmini.
 
 Transfer learning:
   - ImageNet ağırlıkları yüklenir
-  - İlk katmanlar dondurulur, son 2 blok + FC ince ayar yapılır
+  - Diferansiyel LR: erken katmanlar 1e-6, geç katmanlar 1e-5, FC 1e-3
 
-Cikti: happiness, sadness, anger, fear (0-1) — 4 duygu skoru
+Çıktı: happiness, sadness, anger, fear (0-1) — 4 duygu skoru
+Loss: BCEWithLogitsLoss (sigmoid loss içinde, sayısal kararlılık yüksek)
 Wellbeing: tahmin sonrası dinamik formülle hesaplanır (modelin çıktısı değil)
 """
 
@@ -14,12 +15,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import models
 from dataset import DrawingDataset, SCORE_COLS
+import os
 import numpy as np
 import pandas as pd
 
 # ── Ayarlar ───────────────────────────────────────────────────
 BATCH_SIZE = 32
-EPOCHS     = 30
+EPOCHS     = 20
 LR         = 1e-4
 PATIENCE   = 6
 DEVICE     = torch.device("cuda")
@@ -42,30 +44,38 @@ test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE,
 print(f"Train: {len(train_ds)}  |  Test: {len(test_ds)}")
 
 # ── Model ─────────────────────────────────────────────────────
-resnet = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
 
-for name, param in resnet.named_parameters():
-    if not any(name.startswith(x) for x in ("layer3", "layer4", "fc")):
-        param.requires_grad = False
+for param in resnet.parameters():
+    param.requires_grad = True
 
 resnet.fc = nn.Sequential(
-    nn.Linear(resnet.fc.in_features, 128),
+    nn.Linear(resnet.fc.in_features, 256),
+    nn.BatchNorm1d(256),
     nn.ReLU(),
-    nn.Dropout(0.3),
-    nn.Linear(128, 4),
-    nn.Sigmoid(),
+    nn.Dropout(0.5),
+    nn.Linear(256, 64),
+    nn.ReLU(),
+    nn.Dropout(0.4),
+    nn.Linear(64, 4),
+    # Sigmoid yok — BCEWithLogitsLoss loss içinde uygular
 )
 
 resnet = resnet.to(DEVICE)
+total     = sum(p.numel() for p in resnet.parameters())
 trainable = sum(p.numel() for p in resnet.parameters() if p.requires_grad)
+print(f"Toplam parametre      : {total:,}")
 print(f"Egitilebilir parametre: {trainable:,}\n")
 
 # ── Loss ve optimizer ─────────────────────────────────────────
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(
-    filter(lambda p: p.requires_grad, resnet.parameters()),
-    lr=LR, weight_decay=1e-4
-)
+criterion = nn.BCEWithLogitsLoss()
+optimizer = torch.optim.Adam([
+    {"params": resnet.layer1.parameters(), "lr": 1e-6},
+    {"params": resnet.layer2.parameters(), "lr": 1e-6},
+    {"params": resnet.layer3.parameters(), "lr": 1e-5},
+    {"params": resnet.layer4.parameters(), "lr": 1e-5},
+    {"params": resnet.fc.parameters(),     "lr": LR},
+], weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, patience=3, factor=0.5
 )
@@ -73,6 +83,7 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 # ── Eğitim döngüsü ────────────────────────────────────────────
 best_val_loss    = float("inf")
 patience_counter = 0
+best_state_dict   = None
 
 print(f"{'Epoch':<8} {'Train Loss':>12} {'Val Loss':>12} {'Val MAE':>10}")
 print("-" * 46)
@@ -96,8 +107,9 @@ for epoch in range(1, EPOCHS + 1):
         for imgs, scores in test_loader:
             imgs   = imgs.to(DEVICE)
             scores = scores.to(DEVICE)
-            preds  = resnet(imgs)
-            val_losses.append(criterion(preds, scores).item())
+            logits = resnet(imgs)
+            val_losses.append(criterion(logits, scores).item())
+            preds = torch.sigmoid(logits)
             val_maes.append((preds - scores).abs().mean().item())
 
     train_loss = np.mean(train_losses)
@@ -110,7 +122,14 @@ for epoch in range(1, EPOCHS + 1):
     if val_loss < best_val_loss:
         best_val_loss    = val_loss
         patience_counter = 0
-        torch.save(resnet.state_dict(), MODEL_PATH)
+        best_state_dict = {
+            key: value.detach().cpu().clone()
+            for key, value in resnet.state_dict().items()
+        }
+        try:
+            torch.save(best_state_dict, MODEL_PATH)
+        except Exception as exc:
+            print(f"\nModel kaydedilemedi: {exc}")
     else:
         patience_counter += 1
         if patience_counter >= PATIENCE:
@@ -119,13 +138,18 @@ for epoch in range(1, EPOCHS + 1):
 
 # ── En iyi modeli yükle ───────────────────────────────────────
 print(f"\nEn iyi val loss: {best_val_loss:.5f}")
-resnet.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
+if best_state_dict is not None:
+    resnet.load_state_dict(best_state_dict)
+elif os.path.exists(MODEL_PATH):
+    resnet.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+else:
+    raise RuntimeError("En iyi model durumu bulunamadı.")
 resnet.eval()
 
 all_preds, all_labels = [], []
 with torch.no_grad():
     for imgs, scores in test_loader:
-        all_preds.append(resnet(imgs.to(DEVICE)).cpu())
+        all_preds.append(torch.sigmoid(resnet(imgs.to(DEVICE))).cpu())
         all_labels.append(scores)
 
 all_preds  = torch.cat(all_preds).numpy()
@@ -136,6 +160,30 @@ print("-" * 38)
 for i, col in enumerate(SCORE_COLS):
     mae = np.abs(all_preds[:, i] - all_labels[:, i]).mean()
     print(f"{col:<28} {mae:>8.4f}")
+
+metric_rows = []
+for i, col in enumerate(SCORE_COLS):
+    errors = all_preds[:, i] - all_labels[:, i]
+    mae = np.abs(errors).mean()
+    mse = np.mean(errors ** 2)
+    rmse = float(np.sqrt(mse))
+    metric_rows.append({"score": col, "mae": mae, "mse": mse, "rmse": rmse})
+
+overall_errors = all_preds - all_labels
+overall_mae = float(np.abs(overall_errors).mean())
+overall_mse = float(np.mean(overall_errors ** 2))
+overall_rmse = float(np.sqrt(overall_mse))
+metric_rows.append({"score": "overall", "mae": overall_mae, "mse": overall_mse, "rmse": overall_rmse})
+
+metrics_df = pd.DataFrame(metric_rows)
+print(f"\n{'Skor':<28} {'MAE':>8} {'MSE':>10} {'RMSE':>10}")
+print("-" * 62)
+for _, row in metrics_df.iterrows():
+    print(f"{row['score']:<28} {row['mae']:>8.4f} {row['mse']:>10.4f} {row['rmse']:>10.4f}")
+
+metrics_df.to_csv(
+    r"c:\ML_Project\test_metrics_summary.csv", index=False, encoding="utf-8-sig"
+)
 
 # ── Wellbeing: dinamik ağırlıklı formül ──────────────────────
 def compute_wellbeing(h, s, a, f):
@@ -166,9 +214,12 @@ pred_df["pred_psychological_wellbeing"] = [
 pred_df.to_csv(
     r"c:\ML_Project\test_predictions.csv", index=False, encoding="utf-8-sig"
 )
-pred_df.to_excel(
-    r"c:\ML_Project\test_predictions.xlsx", index=False, engine="openpyxl"
-)
+try:
+    pred_df.to_excel(
+        r"c:\ML_Project\test_predictions.xlsx", index=False, engine="openpyxl"
+    )
+except PermissionError as exc:
+    print(f"Tahminler Excel'e yazılamadı: {exc}")
 
 wb_mean = pred_df["pred_psychological_wellbeing"].mean()
 print(f"\nOrtalama wellbeing (test): {wb_mean:.1f} / 100")
